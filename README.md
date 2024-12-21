@@ -6,3 +6,16 @@ NOTE: You must install Pyrebase 4 which is a forked version of Pyrebase. IsoLinn
 pip install ruuvitag-sensor
 pip install pyrebase4
 ```
+Add a isolinna.json with following information:
+```sh
+{
+  "apiKey": "",
+  "authDomain": "",
+  "databaseURL": "",
+  "projectId": "",
+  "storageBucket": "",
+  "messagingSenderId": "",
+  "appId": "",
+  "measurementId": ""
+}
+```
