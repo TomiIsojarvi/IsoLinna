@@ -14,6 +14,8 @@ device_uuid = None
 # Time Interval
 time_interval = 1
 
+broadcasting = False
+
 #-----------------------------------------------------------------------------#
 #                                RUUVI RELATED                                #
 #-----------------------------------------------------------------------------#
@@ -28,7 +30,7 @@ auto_filtering = True
 #-----------------------------------------------------------------------------#
 #                              FIREBASE RELATED                               #
 #-----------------------------------------------------------------------------#
-user = None
+user_uid = None
 firebaseConfig = None
 firebase = None
 auth = None
@@ -132,10 +134,24 @@ def ui_enter_command(text: str, commands: list):
 # broadcast_screen - Broadcast Screen
 #------------------------------------------------------------------------------
 def broadcast_screen():
+    global broadcasting
+
+    settings_path = "./settings.txt"
+
+    if not broadcasting:
+        try:
+            with open(settings_path, 'w') as f:
+                f.write(f"{user_uid}\n")
+                f.write(f"{refresh_token}\n")   
+        except IOError:
+            print("settings.txt: Could not create or write file")
+            exit()
+
+        broadcasting = True
 
     # refresh_user_token - Refreshes the user's token -------------------------
     def refresh_user_token():
-        global user, id_token, refresh_token, token_expiration_time
+        global user_uid, id_token, refresh_token, token_expiration_time
 
         try:
             tokens = auth.refresh(refresh_token)
@@ -144,15 +160,19 @@ def broadcast_screen():
             token_expiration_time = int(time.time()) + 3600 # 3600 seconds = 1 hour
         except Exception as e:
             print("Error refreshing token:", e)
+
+        try:
+            with open(settings_path, 'w') as f:
+                f.write(f"{user_uid}\n")
+                f.write(f"{refresh_token}\n")
+        except IOError:
+            print("settings.txt: Could not create or write file")
+            exit()
     #--------------------------------------------------------------------------
 
     # send_sensors - Callback function for sending Ruuvi data -----------------
     def send_sensors(found_data):
-        global time_interval
-        global data_history
-        global last_sent_timestamp
-        global ui_buffer
-        global token_expiration_time
+        global time_interval, data_history, last_sent_timestamp, ui_buffer, token_expiration_time
         
         mac_address, sensor_data = found_data
 
@@ -171,7 +191,7 @@ def broadcast_screen():
             entry = {"timestamp": utc_timestamp, "mac": mac_address, "data": sensor_data}
             data_history.append(entry)
 
-            db.child("users").child(user['localId']).child("devices").child(device_uuid).child(mac_address).set(
+            db.child("users").child(user_uid).child("devices").child(device_uuid).child(mac_address).set(
                 {
                     'utc_timestamp': utc_timestamp,
                     'temperature': sensor_data['temperature'], 
@@ -211,11 +231,16 @@ def broadcast_screen():
 
     # back - Go back to the Main Screen ---------------------------------------
     def back():
-        global data_history
-        nonlocal finished
+        global data_history, broadcasting
+        nonlocal finished, settings_path
         run_flag.running = False
         data_history = []
+        broadcasting = False
         finished = True
+
+        if (os.path.isfile(settings_path)):
+             os.remove(settings_path)
+
     #--------------------------------------------------------------------------
 
     run_flag.running = True
@@ -486,9 +511,25 @@ def interval_screen():
 # login_screen - Login screen
 #------------------------------------------------------------------------------
 def login_screen():
-    global ui_buffer
-    global user
-    global id_token, refresh_token, token_expiration_time
+    global ui_buffer, user_uid, id_token, refresh_token, token_expiration_time, broadcasting
+
+    settings_path = "./settings.txt"
+
+    # Does settings.txt exists?
+    if (os.path.isfile(settings_path)):
+        # Yes...
+        # Read the settings from settings.txt
+        try:
+            with open(settings_path, 'r') as f:
+                lines = f.readlines()
+                user_uid = lines[0].strip()
+                refresh_token = lines[1].strip()
+        except IOError:
+            print("settings.txt: Could not read file")
+            exit()
+        
+        broadcasting = True
+        main_screen()
 
     ui_clear()
     ui_title("IsoLinna Control Panel v.1.0", 80)
@@ -504,6 +545,7 @@ def login_screen():
         print("\033[1m\033[91mError: Invalid email or password\033[0m")
         exit()
 
+    user_uid = user['localId']
     id_token = user['idToken']
     refresh_token = user['refreshToken']
     token_expiration_time = int(time.time()) + int(user['expiresIn'])
@@ -512,8 +554,11 @@ def login_screen():
 # main_screen - Main screen
 #------------------------------------------------------------------------------
 def main_screen():
-    global user, device_uuid
+    global user_uid, device_uuid
     login = True
+
+    if broadcasting == True:
+        broadcast_screen()
 
     # log_out - Logs out the user ---------------------------------------------
     def log_out():
@@ -524,7 +569,7 @@ def main_screen():
     #--------------------------------------------------------------------------
 
     while login:
-        user_string = f"User UID:      {user['localId']}"
+        user_string = f"User UID:      {user_uid}"
         uuid_string = f"Device UUID:   {device_uuid}"
 
         if time_interval == 1:
@@ -544,18 +589,16 @@ def main_screen():
 #                                    MAIN                                     #
 #-----------------------------------------------------------------------------#
 def main():
-    global device_uuid, firebaseConfig, firebase, auth, db
+    global device_uuid, firebaseConfig, firebase, auth, db, broadcasting
 
-    path = './uuid.txt'
-
-    check_file = os.path.isfile(path)
+    uuid_path = './uuid.txt'
 
     # Does uuid.txt exists?
-    if (check_file):
+    if (os.path.isfile(uuid_path)):
         # Yes...
         # Read the Device UUID from uuid.txt
         try:
-            with open("uuid.txt", 'r') as f:
+            with open(uuid_path, 'r') as f:
                 device_uuid = f.read()
         except IOError:
             print("uuid.txt: Could not read file")
@@ -566,7 +609,7 @@ def main():
         device_uuid = uuid.uuid1()
         # ...and write it to uuid.txt
         try:
-            with open("uuid.txt", 'w') as f:
+            with open(uuid_path, 'w') as f:
                 f.write(str(device_uuid))
                 print("uuid.txt: File created successfully.")
         except IOError:
