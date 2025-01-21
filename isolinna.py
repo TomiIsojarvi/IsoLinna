@@ -1,188 +1,131 @@
 import os
+import json
+import uuid
+import pyrebase
 import time
 import threading
-import uuid
-import getpass
-from collections import defaultdict
-import pyrebase
 from ruuvitag_sensor.ruuvi import RuuviTagSensor, RunFlag
 from datetime import datetime, timezone
-import json
+from rich.console import Console
+from rich.prompt import Prompt, IntPrompt
+from rich.panel import Panel
+from rich import box
+from rich.table import Table
+from rich.text import Text
+from rich.columns import Columns
+from rich.console import Group
+from rich import print
+from rich.markup import escape
+import logging
 
-# Device UUID
-device_uuid = None
-# Time Interval
-time_interval = 1
+# Turn off the warnings because of ruuvitag_sensor
+logging.basicConfig(level=logging.ERROR)
 
-broadcasting = False
+# Global Constants
+SETTINGS_PATH = 'settings.json'
+FIREBASE_CONF_PATH = 'isolinna.json'
+TOKEN_UPDATE_DURATION = 1800    # 1800 seconds = 30 minutes
 
-#-----------------------------------------------------------------------------#
-#                                RUUVI RELATED                                #
-#-----------------------------------------------------------------------------#
-run_flag = RunFlag()
+settings = {}
 
-unique_macs = set()
-filtered_macs = set()
-auto_filtering = True
-
-#-----------------------------------------------------------------------------#
-
-#-----------------------------------------------------------------------------#
-#                              FIREBASE RELATED                               #
-#-----------------------------------------------------------------------------#
-user_uid = None
-firebaseConfig = None
+firebaseConfig = {}
 firebase = None
 auth = None
 db = None
 
-last_sent_timestamp = None 
-time_stamps = defaultdict(lambda: None)
-data_history = list()
+discovered_sensors = []
+run_flag = RunFlag()
+time_stamps = {}
 
-id_token = ""
-refresh_token = ""
-token_expiration_time = 0
-refresh_token_interval = 0
-token_update_time = 1800    # 1800 seconds = 30 minutes
-
-
-#-----------------------------------------------------------------------------#
+console = Console()
 
 #-----------------------------------------------------------------------------#
 #                                 UI RELATED                                  #
 #-----------------------------------------------------------------------------#
 
-ui_buffer = ""
+#-----------------------------------------------------------------------------#
+# ui_title - Prints a title                                                   #
+#-----------------------------------------------------------------------------#
+def ui_title(title: str, width: int = 80):
+    console.print(Panel(Text(title, justify="center"), style="bold green", width=width))
 
-# Unicode codes:
-# 2500: ─, 2502: │, 250C: ┌,  2510: ┐, 2514: └, 2518: ┘, 251C: ├, 2524: ┤
+#-----------------------------------------------------------------------------#
+# ui_commmands - Prints and handles the commands                              #
+#-----------------------------------------------------------------------------#
+def ui_commands(commands_strings: list, commands: list):
+    # Print each command with its index number
+    for i, command in enumerate(commands_strings, 1):
+        console.print(f"{i}. [white]{command}")
 
-#------------------------------------------------------------------------------
-# ui_clear - Clears the screen
-#------------------------------------------------------------------------------
-def ui_clear():
-    global ui_buffer
-    ui_buffer = ""
-    os.system('cls' if os.name == 'nt' else 'clear')
-    print("\033[H\033[J", end="")
+    console.print()
 
-#------------------------------------------------------------------------------
-# ui_title - Prints a title
-#------------------------------------------------------------------------------
-def ui_title(text: str, width: int):
-    global ui_buffer
+    # Handle input
+    command = IntPrompt.ask("Enter command")
 
-    output = "\u250C" + "\u2500" * width + "\u2510\n"
-    output += "\u2502" + text.center(width) + "\u2502\n"
-    output += "\u2514" + "\u2500" * width + "\u2518\n"
-
-    ui_buffer += output
-
-#------------------------------------------------------------------------------
-# ui_table - Prints a table
-#------------------------------------------------------------------------------
-def ui_table(title: str, content: list, width: int):
-    global ui_buffer
-
-    # Title
-    output = "\u250C" + "\u2500" * width + "\u2510\n"
-    output += "\u2502" +  "\u0020" +  title + "\u0020" * (width - len(title)- 1) + "\u2502\n"
-    output += "\u251C" + "\u2500" * width + "\u2524\n"
-    # Content
-    for e in content:
-        output += "\u2502" + "\u0020" + e + "\u0020" * (width - len(e) - 1) + "\u2502\n"
-    output += "\u2514" + "\u2500" * width + "\u2518\n"
-
-    ui_buffer += output
-
-#------------------------------------------------------------------------------
-# ui_commands - Prints commands
-#------------------------------------------------------------------------------
-def ui_commands(commands: list):
-    global ui_buffer
-    output = ""
-
-    for i in range(len(commands)):
-        output +=f" {i + 1}: {commands[i]}\n" 
-
-    ui_buffer += output
-
-#------------------------------------------------------------------------------
-# ui_enter_command - Handles commands
-#------------------------------------------------------------------------------
-def ui_enter_command(text: str, commands: list):
-    global ui_buffer
-
-    ui_buffer += "\n" + text
-    print(ui_buffer, end="", flush=True)
-    command = input()
-
-    if command.isdigit():
-        command = int(command)
-
-        if command > 0 and command <= len(commands):
-            commands[command - 1]()
-
-
+    if command <= 0 or command > len(commands):
+        return
+    else:
+        commands[command - 1]()
 
 #-----------------------------------------------------------------------------#
 #                                   SCREENS                                   #
 #-----------------------------------------------------------------------------#
 
-#------------------------------------------------------------------------------
-# broadcast_screen - Broadcast Screen
-#------------------------------------------------------------------------------
-def broadcast_screen():
-    global broadcasting
+#-----------------------------------------------------------------------------#
+# broadcasting_screen - Broadcasting Screen                                   #
+#-----------------------------------------------------------------------------#
+def broadcasting_screen():
+    global settings, SETTINGS_PATH, run_flag
+    finished = False
+    data_history = []
 
-    settings_path = "./settings.txt"
+    if not settings['broadcasting']:
+        settings['broadcasting'] = True
 
-    if not broadcasting:
         try:
-            with open(settings_path, 'w') as f:
-                f.write(f"{user_uid}\n")
-                f.write(f"{refresh_token}\n")   
+            with open(SETTINGS_PATH, 'w') as f:
+                json.dump(settings, f, indent=4)
         except IOError:
-            print("settings.txt: Could not create or write file")
-            exit()
-
-        broadcasting = True
+            print(f"[bold red]{SETTINGS_PATH}: Could not write file. Please check if you have write permissions.")
+            exit(1)
 
     # refresh_user_token - Refreshes the user's token -------------------------
     def refresh_user_token():
-        global user_uid, id_token, refresh_token, token_expiration_time
+        global settings, SETTINGS_PATH
 
         try:
-            tokens = auth.refresh(refresh_token)
-            id_token = tokens['idToken']
-            refresh_token = tokens['refreshToken']
-            token_expiration_time = int(time.time()) + 3600 # 3600 seconds = 1 hour
+            tokens = auth.refresh(settings['refresh_token'])
+            settings['id_token'] = tokens['idToken']
+            settings['refresh_token'] = tokens['refreshToken']
+            settings['token_expiration_time'] = int(time.time()) + 3600 # 3600 seconds = 1 hour
         except Exception as e:
-            print("Error refreshing token:", e)
+            print("Error refreshing token: ", e)
 
         try:
-            with open(settings_path, 'w') as f:
-                f.write(f"{user_uid}\n")
-                f.write(f"{refresh_token}\n")
+            with open(SETTINGS_PATH, 'w') as f:
+                json.dump(settings, f, indent=4)
         except IOError:
-            print("settings.txt: Could not create or write file")
+            print(f"[bold red]{SETTINGS_PATH}: Could not create or write file")
             exit()
     #--------------------------------------------------------------------------
 
     # send_sensors - Callback function for sending Ruuvi data -----------------
     def send_sensors(found_data):
-        global time_interval, data_history, last_sent_timestamp, ui_buffer, token_expiration_time
-        
+        global settings
+        nonlocal data_history
+
         mac_address, sensor_data = found_data
 
+        if sensor_data['data_format'] < 5:
+            return
+        
         current_time = time.time()
 
         # Check if the token has to be refreshed
-        if (token_expiration_time - int(current_time)) <= token_update_time:
+        if (settings['token_expiration_time'] - int(current_time)) <= TOKEN_UPDATE_DURATION:
             refresh_user_token()
 
-        if time_stamps[mac_address] is None or (current_time - time_stamps[mac_address]) >= time_interval * 60:
+        if time_stamps.get(mac_address) is None or (current_time - time_stamps[mac_address]) >= settings['time_interval'] * 60:
             time_stamps[mac_address] = current_time
             if len(data_history) == 10:
                 data_history.pop(0)
@@ -191,7 +134,7 @@ def broadcast_screen():
             entry = {"timestamp": utc_timestamp, "mac": mac_address, "data": sensor_data}
             data_history.append(entry)
 
-            db.child("users").child(user_uid).child("devices").child(device_uuid).child(mac_address).set(
+            db.child("users").child(settings['user_uid']).child("devices").child(settings['device_uuid']).child(mac_address).push(
                 {
                     'utc_timestamp': utc_timestamp,
                     'temperature': sensor_data['temperature'], 
@@ -200,104 +143,157 @@ def broadcast_screen():
                     'rssi': sensor_data['rssi'],
                     'battery': sensor_data['battery']
                 }, 
-                id_token
+                settings['id_token']
             )
 
-            str_list = []
+            db.child("users").child(settings['user_uid']).child("devices").child(settings['device_uuid']).child("new_values").child(mac_address).update(
+                {
+                    'utc_timestamp': utc_timestamp,
+                    'temperature': sensor_data['temperature'], 
+                    'humidity': sensor_data['humidity'], 
+                    'pressure': sensor_data['pressure'], 
+                    'rssi': sensor_data['rssi'],
+                    'battery': sensor_data['battery']
+                }, 
+                settings['id_token']
+            )
 
-            for e in data_history:
-                str_list.append(
-                    f"({e['timestamp']}) {e['mac']}: "
-                    f"T: {e['data']['temperature']} \u00B0C "
-                    f"P: {e['data']['pressure']} hPa "
-                    f"H: {e['data']['humidity']} %"
-                )
+            console.clear()
+            ui_title("Broadcasting...")
+            console.print()
 
-            ui_clear()
-            ui_title("Broadcasting...", 80)
-            ui_table("History", str_list, 80)
-            ui_commands(["Stop broadcasting"])
-            ui_buffer += "\nEnter command: "
-            print(ui_buffer, end="", flush=True)
+            # Print table
+            table = Table(title="Recent Events", width=80, box=box.ROUNDED, style="green", title_style="bold green")
+
+            table.add_column("Time", justify="center", style="cyan", header_style="bold cyan")
+            table.add_column("Sensor", justify="center", style="blue", header_style="bold blue")
+            table.add_column("Data", justify="center", style="white", header_style="bold white")
+
+            for data in data_history:
+                data_str = f"Temperature: {data['data']['temperature']} \u00B0C, Humidity: {data['data']['humidity']} %, Pressure: {data['data']['pressure']} hPa, RSSI: {data['data']['rssi']} dBm, Battery: {(data['data']['battery']) / 1000} V"
+                table.add_row(Text(datetime.strptime(data['timestamp'], "%Y-%m-%dT%H:%M:%SZ").strftime("%Y-%m-%d %H:%M:%S")), Text(data['mac']), Text(data_str))
+
+            print(table)
+
+            # List of commands
+            commands_strings = ["Stop broadcasting"]
+
+            # Print each command with its index number
+            for i, command in enumerate(commands_strings, 1):
+                console.print(f"{i}. {command}")
+
+            console.print()
+            print("Enter command: ", end="", flush=True)
+
     #--------------------------------------------------------------------------
 
     # send_sensors_thread - Thread for sending Ruuvi-data ---------------------
     def send_sensors_thread():
-        if len(filtered_macs) == 0: 
+        if len(settings['followed_sensors']) == 0: 
             RuuviTagSensor.get_data(send_sensors, None, run_flag)
         else:
-            RuuviTagSensor.get_data(send_sensors, filtered_macs, run_flag)
-    #--------------------------------------------------------------------------
-
-    # back - Go back to the Main Screen ---------------------------------------
-    def back():
-        global data_history, broadcasting
-        nonlocal finished, settings_path
-        run_flag.running = False
-        data_history = []
-        broadcasting = False
-        finished = True
-
-        if (os.path.isfile(settings_path)):
-             os.remove(settings_path)
-
+            RuuviTagSensor.get_data(send_sensors, settings['followed_sensors'], run_flag)
     #--------------------------------------------------------------------------
 
     run_flag.running = True
     thread = threading.Thread(target=send_sensors_thread)
     thread.start()
-    finished = False
+
+    # back - Save settings and go back to the Main Screen ---------------------
+    def back():
+        global settings, SETTINGS_PATH
+        nonlocal finished
+
+        finished = True
+        run_flag.running = False
+        settings['broadcasting'] = False
+
+        try:
+            with open(SETTINGS_PATH, 'w') as f:
+                json.dump(settings, f, indent=4)
+        except IOError:
+            print(f"[bold red]{SETTINGS_PATH}: Could not write file. Please check if you have write permissions.")
+            exit(1)
+    #--------------------------------------------------------------------------
 
     # Render loop...
     while not finished:
-        str_list = []
+        console.clear()
+        ui_title("Broadcasting...")
 
-        for e in data_history:
-            str_list.append(
-                f"({e['timestamp']}) {e['mac']}: "
-                f"T: {e['data']['temperature']} \u00B0C "
-                f"P: {e['data']['pressure']} hPa "
-                f"H: {e['data']['humidity']} %"
-            )
+        # Print table
+        table = Table(title="Recent Events", width=80, box=box.ROUNDED, style="green", title_style="bold green")
 
-        ui_clear()
-        ui_title("Broadcasting...", 80)
-        ui_table("History", str_list, 80)
-        # Print and handle commands
-        ui_commands(["Stop broadcasting"])
-        ui_enter_command("Enter command: ", [back])
+        table.add_column("Time", justify="center", style="cyan", header_style="bold cyan")
+        table.add_column("Sensor", justify="center", style="blue", header_style="bold blue")
+        table.add_column("Data", justify="center", style="white", header_style="bold white")
 
+        for data in data_history:
+            data_str = f"Temperature: {data['data']['temperature']} \u00B0C, Humidity: {data['data']['humidity']} %, Pressure: {data['data']['pressure']} hPa, RSSI: {data['data']['rssi']} dBm, Battery: {(data['data']['battery']) / 1000} V"
+            table.add_row(Text(datetime.strptime(data['timestamp'], "%Y-%m-%dT%H:%M:%SZ").strftime("%Y-%m-%d %H:%M:%S")), Text(data['mac']), Text(data_str))
 
-#------------------------------------------------------------------------------
-# scanning_screen - Scanning Screen
-#------------------------------------------------------------------------------
+        print(table)
+
+        # List of commands
+        commands_strings = ["Stop broadcasting"]
+        commands = [back]
+
+        # Handle commands
+        ui_commands(commands_strings, commands)
+
+#-----------------------------------------------------------------------------#
+# scanning_screen - Scanning Screen                                           #
+#-----------------------------------------------------------------------------#
 def scanning_screen():
-    ui_clear()
-
-    ui_update = True            # Should the screen to be updated?
+    global discovered_sensors, settings, run_flag
+    finished = False
     run_flag.running = True     # Scanning flag
-    unique_macs.clear()
-    filtered_macs.clear()
+    ui_update = True            # Should the screen to be updated?
+    new_discoveries = []
 
-    # scan_sensors - Callback function for the Ruuvi scan --------------------
+    # back - Go back to Main Screen -------------------------------------------
+    def back():
+        global run_flag
+        nonlocal finished
+        run_flag.running = False
+        finished = True
+    #--------------------------------------------------------------------------
+
+    # scan_sensors - Callback function for the Ruuvi get_data -----------------
     def scan_sensors(found_data):
-        global ui_buffer
+        global ui_buffer, discovered_sensors
         nonlocal ui_update
 
         mac_address, sensor_data = found_data
-        if mac_address not in unique_macs:
-            unique_macs.add(mac_address)
+
+        if mac_address not in discovered_sensors:
+            if sensor_data['data_format'] < 5:
+                return
+            
+            discovered_sensors.append(mac_address)
+            new_discoveries.append(mac_address)
             ui_update = True
 
         if ui_update == True:
-            mac_list = list(unique_macs)
+            console.clear()
+            ui_title("Scanning sensors...")
+            # Print newly discovered sensors...
+            if len(new_discoveries) == 0:
+                console.print(Panel(Text(""), title="[bold green]New Discovered Sensors", style="green", width=80))
+            else:
+                discoveries_text = Text("\n".join(new_discoveries), style="bold white")
+                console.print(Panel(discoveries_text, title="[bold green]New Discovered Sensors", style="green", width=80))
+            
+            # List of commands
+            commands_strings = ["Stop scanning"]
+            commands = [back]
 
-            ui_clear()
-            ui_title("Scanning for sensors...", 80)
-            ui_table("Discovered Sensors:", mac_list, 80)
-            ui_commands(["Stop scanning"])
-            ui_buffer += "\nEnter command: "
-            print(ui_buffer, end="", flush=True)
+            # Print each command with its index number
+            for i, command in enumerate(commands_strings, 1):
+                console.print(f"{i}. {command}")
+
+            console.print()
+            print("Enter command: ", end="", flush=True)
 
             ui_update = False
     #--------------------------------------------------------------------------
@@ -307,58 +303,57 @@ def scanning_screen():
         RuuviTagSensor.get_data(scan_sensors, None, run_flag)
     #--------------------------------------------------------------------------
 
-    # back - Go back to the Sensors Screen ------------------------------------
-    def back():
-        nonlocal finished
-        run_flag.running = False
-        finished = True
-    #--------------------------------------------------------------------------
-
     # Create a thread for scanning Ruuvi-sensors
     thread = threading.Thread(target=scan_sensors_thread, daemon=True)
     thread.start()
     finished = False
-    
+
     # Render loop...
     while not finished:
-        mac_list = list(unique_macs)
-        ui_clear()
-        ui_title("Scanning for sensors...", 80)
-        ui_table("Discovered Sensors:", mac_list, 80)
-        ui_commands(["Stop scanning"])
-        ui_enter_command("Enter command: ", [back])
+        console.clear()
+        ui_title("Scanning sensors...")
+        
+        # Print newly discovered sensors...
+        if len(new_discoveries) == 0:
+            console.print(Panel(Text(""), title="[bold green]New Discovered Sensors", style="green", width=80))
+        else:
+            discoveries_text = Text("\n".join(new_discoveries), style="bold white")
+            console.print(Panel(discoveries_text, title="[bold green]New Discovered Sensors", style="green", width=80))
+        
+        # List of commands
+        commands_strings = ["Stop scanning"]
+        commands = [back]
 
+        # Handle commands
+        ui_commands(commands_strings, commands)
 
-#------------------------------------------------------------------------------
-# add_remove_sensor_screen - Add / Remove Sensor Screen
-#------------------------------------------------------------------------------
-def add_remove_sensor_screen():
+#-----------------------------------------------------------------------------#
+# follow_unfollow_sensors_screen - Follow / Unfollow Sensors Screen           #
+#-----------------------------------------------------------------------------#
+def follow_unfollow_sensors_screen():
+    global discovered_sensors, settings
     finished = False
+    discovered_sensors_strings = []
 
-    # add_remove - Moves sensors from table to table ---------------------------
-    def add_remove():
-        nonlocal unique_macs_list
-        nonlocal difference
-        sensor_number = input("Enter sensor number: ")
+    # follow_unfollow - Follow or unfollow a sensor ---------------------------
+    def follow_unfollow():
+        global discovered_sensors, settings
 
-        if sensor_number.isdigit():
-            sensor_number = int(sensor_number)
+        sensor_number = IntPrompt.ask("Enter sensor number")
             
-            if sensor_number > 0 and sensor_number <= len(unique_macs_list):
-                mac = unique_macs_list[sensor_number - 1]
+        if sensor_number > 0 and sensor_number <= len(discovered_sensors):
+            mac = discovered_sensors[sensor_number - 1]
 
-                if mac in difference:
-                    filtered_macs.add(mac)
-                    difference = unique_macs - filtered_macs
-                else:
-                    filtered_macs.remove(mac)
-                    difference = unique_macs - filtered_macs
+            if mac in settings['followed_sensors']:
+                settings['followed_sensors'].remove(mac)
+            else:
+                settings['followed_sensors'].append(mac)
     #--------------------------------------------------------------------------
     
     # automatic - Set up automatic filtering ----------------------------------
     def automatic():
         nonlocal finished
-        filtered_macs.clear()
+        settings['followed_sensors'] = []
         finished = True
     #--------------------------------------------------------------------------
 
@@ -370,265 +365,387 @@ def add_remove_sensor_screen():
 
     # Render loop...
     while not finished:
-        unique_macs_list = list(unique_macs)
-        filtered_macs_list = list(filtered_macs)
-        difference = unique_macs - filtered_macs
-        difference_list = list(difference)
+        # Discovered sensors strings...
+        discovered_sensors_strings = [f"{index + 1}: {sensor}" for index, sensor in enumerate(discovered_sensors)]
+        
+        # Followed sensors strings...
+        followed_sensors_sorted = sorted(
+            settings['followed_sensors'], 
+            key=lambda sensor: discovered_sensors.index(sensor) + 1
+        )
 
-        # Available sensors...
-        for i in range(len(difference_list)):
-            difference_list[i] = f"{unique_macs_list.index(difference_list[i]) + 1}: {difference_list[i]}"
-
-        # Filtered sensors...
-        for i in range(len(filtered_macs_list)):
-            filtered_macs_list[i] = f"{unique_macs_list.index(filtered_macs_list[i]) + 1}: {filtered_macs_list[i]}"
-
-        ui_clear()
-        ui_title("Add / Remove", 80)
-        ui_table("Sensors", difference_list, 80)
-        ui_table("Filtered Sensors", list(filtered_macs_list), 80)
-
-        # Print and handle commands...
-        ui_commands(["Add / Remove", "Automatic", "Back"])
-        ui_enter_command("Enter command: ", [add_remove, automatic, back])
+        followed_sensors_strings = [
+            f"{discovered_sensors.index(sensor) + 1}: {sensor}" for sensor in followed_sensors_sorted
+        ]
 
 
-#------------------------------------------------------------------------------
-# sensors_screen - Sensors Screen
-#------------------------------------------------------------------------------
+        console.clear()
+        ui_title("Follow / Unfollow Sensors")
+
+        # Print discovered sensors...
+        discovered_text = Text("\n".join(discovered_sensors_strings), style="bold white")
+        console.print(Panel(discovered_text, title="[bold green]Discovered Sensors", style="green", width=80))
+
+        # Print followed sensors...
+        if len(settings['followed_sensors']) == 0:
+            console.print(Panel(Text("Automatic", style="bold white"), title="[bold green]Followed Sensors", style="green", width=80))
+        else:
+            followed_text = Text("\n".join(followed_sensors_strings), style="bold white")
+            console.print(Panel(followed_text, title="[bold green]Followed Sensors", style="green", width=80))
+
+        # List of commands
+        commands_strings = ["Follow / Unfollow", "Automatic", "Back"]
+        commands = [follow_unfollow, automatic, back]
+        
+        # Handle commands
+        ui_commands(commands_strings, commands)
+        
+        discovered_sensors_strings.clear()
+        followed_sensors_strings.clear()
+
+#-----------------------------------------------------------------------------#
+# sensors_screen - Sensors Screen                                             #
+#-----------------------------------------------------------------------------#
 def sensors_screen():
+    global settings, discovered_sensors
     finished = False
 
-    # back - Go back to the Main Screen ---------------------------------------
+    if len(discovered_sensors) == 0:
+        if len(settings['followed_sensors']) > 0:
+            discovered_sensors = settings['followed_sensors'].copy()
+
+    # back - Save settings and go back to Main Screen -------------------------
     def back():
+        global settings, SETTINGS_PATH
         nonlocal finished
         finished = True
+
+        try:
+            with open(SETTINGS_PATH, 'w') as f:
+                json.dump(settings, f, indent=4)
+        except IOError:
+            print(f"[bold red]{SETTINGS_PATH}: Could not write file. Please check if you have write permissions.")
+            exit(1)
     #--------------------------------------------------------------------------
+
+    def clear_sensors():
+        global discovered_sensors, settings
+        discovered_sensors.clear()
+        settings['followed_sensors'] = []
 
     # Render loop...
     while not finished:
-        ui_clear()
-        ui_title("Sensors", 80)
+        console.clear()
+        ui_title("Sensors")
 
-        # Print discovered sensors table...
-        if len(unique_macs) == 0:
-            ui_table("Discovered Sensors:", ["None"], 80)
+        # Print discovered sensors...
+        if len(discovered_sensors) == 0:
+            console.print(Panel(Text("None", style="bold white"), title="[bold green]Discovered Sensors", style="green", width=80))
         else:
-            mac_list = list(unique_macs)
-            ui_table("Discovered Sensors:", mac_list, 80)
+            discovered_text = Text("\n".join(discovered_sensors), style="bold white")
+            console.print(Panel(discovered_text, title="[bold green]Discovered Sensors", style="green", width=80))
 
-        # Print filtered sensors table...
-        if len(filtered_macs) == 0:
-            ui_table("Filtered Sensors:", ["Automatic"], 80)
+        # Print followed sensors...
+        if len(settings['followed_sensors']) == 0:
+            console.print(Panel(Text("Automatic", style="bold white"), title="[bold green]Followed Sensors", style="green", width=80))
         else:
-            mac_list = list(filtered_macs)
-            ui_table("Filtered Sensorrs:", mac_list, 80)
-        
-        # Print commands...
-        if len(unique_macs) == 0:
-            ui_commands(["Start scanning", "Back"])
+            followed_text = Text("\n".join(settings['followed_sensors']), style="bold white")
+            console.print(Panel(followed_text, title="[bold green]Followed Sensors", style="green", width=80))
+
+        # List of commands
+        if len(discovered_sensors) == 0:
+            commands_strings = ["Start scanning", "Back"]
+            commands = [scanning_screen, back]
         else:
-            ui_commands(["Start scanning", "Add / Remove", "Back"])
+            commands_strings = ["Start scanning", "Follow / Unfollow Sensors", "Clear Sensors", "Back"]
+            commands = [scanning_screen, follow_unfollow_sensors_screen, clear_sensors, back]
 
-        # Handle commands...
-        if len(unique_macs) == 0:
-            ui_enter_command("Enter command: ", [scanning_screen, back])
-        else:
-            ui_enter_command("Enter command: ", [scanning_screen, add_remove_sensor_screen, back])
+        # Handle commands
+        ui_commands(commands_strings, commands)
 
-
-#------------------------------------------------------------------------------
-# uuid_screen - Device UUID Screen
-#------------------------------------------------------------------------------
-def uuid_screen():
-    global device_uuid
+#-----------------------------------------------------------------------------#
+# settings_screen - Settings screen                                           #
+#-----------------------------------------------------------------------------#
+def settings_screen():
+    global settings
     finished = False
 
-    # generate_uuid - Generates a new Device UUID and saves it ----------------
+    # back - Save settings and go back to Main Screen -------------------------
+    def back():
+        global settings, SETTINGS_PATH
+        nonlocal finished
+        finished = True
+
+        # Save settings to settings-file
+        try:
+            with open(SETTINGS_PATH, 'w') as f:
+                json.dump(settings, f, indent=4)
+        except IOError:
+            print(f"[bold red]{SETTINGS_PATH}: Could not write file. Please check if you have write permissions.")
+            exit(1)
+    #--------------------------------------------------------------------------
+
+    # generate_uuid - Generates a new Deivce UUID -----------------------------
     def generate_uuid():
-        global device_uuid
-        device_uuid = uuid.uuid1()
-
-        try:
-            with open("uuid.txt", 'w') as f:
-                f.write(str(device_uuid))
-        except IOError:
-            print("uuid.txt error: Could not write to file")
-            exit()
-    #--------------------------------------------------------------------------
-
-    # back - Go back to the Main Screen ---------------------------------------
-    def back():
-        nonlocal finished
-        finished = True
+        settings['device_uuid'] = str(uuid.uuid1())  # Generate UUID and convert it to string
     #--------------------------------------------------------------------------
 
     # Render loop...
     while not finished:
-        ui_clear()
-        ui_title("Device UUID", 80)
-        ui_table("Device UUID:", [str(device_uuid)], 80)
-        ui_commands(["Generate new Device UUID", "Back"])
-        ui_enter_command("Enter command: ", [generate_uuid, back])
+        device_uuid_column = Columns([Text("Device UUID:", style="bold blue"), Text(settings['device_uuid'], style="white")])
 
-
-#------------------------------------------------------------------------------
-# interval_screen - Time Interval Screen
-#------------------------------------------------------------------------------
-def interval_screen():
-    finished = False
-
-    # change_interval - Aks user to give a new time interval ------------------
-    def change_interval():
-        global time_interval
-        interval = input("Enter new Time Interval: ")
-
-        if interval.isdigit():
-            time_interval = int(interval)
-            if time_interval == 0:
-                time_interval = 1
-    #--------------------------------------------------------------------------
-
-    # back - Go back to the Main Screen ---------------------------------------
-    def back():
-        nonlocal finished
-        finished = True
-    #--------------------------------------------------------------------------
-
-    # Render loop...
-    while not finished:
-        ui_clear()
-        ui_title("Time Interval", 80)
-        if time_interval == 1:
-            ui_table("Time Interval:", ["1 minute"], 80)
+        if (settings['time_interval'] == 1):
+            time_interval_column = Columns([Text("Time Interval:", style="bold blue"), Text("1 minute", style="white")] )
         else:
-            ui_table("Time Interval:", [str(time_interval) + " minutes"], 80)
-        ui_commands(["Change Time Interval", "Back"])
-        ui_enter_command("Enter command: ", [change_interval, back])
+            time_interval_column = Columns([Text("Time Interval:", style="bold blue"), Text(str(settings['time_interval']) + " minutes", style="white")])
 
+        rows = Group(device_uuid_column, time_interval_column)
 
-#------------------------------------------------------------------------------
-# login_screen - Login screen
-#------------------------------------------------------------------------------
-def login_screen():
-    global ui_buffer, user_uid, id_token, refresh_token, token_expiration_time, broadcasting
-
-    settings_path = "./settings.txt"
-
-    # Does settings.txt exists?
-    if (os.path.isfile(settings_path)):
-        # Yes...
-        # Read the settings from settings.txt
-        try:
-            with open(settings_path, 'r') as f:
-                lines = f.readlines()
-                user_uid = lines[0].strip()
-                refresh_token = lines[1].strip()
-        except IOError:
-            print("settings.txt: Could not read file")
-            exit()
+        # prompt_uuid - Device UUID Prompt ------------------------------------
+        def prompt_uuid():
+            nonlocal rows
+            
+            console.clear()
+            console.print(Panel(Text("Settings", justify="center"), style="bold green", width=80))
         
-        broadcasting = True
+            # Print device information
+            console.print(Panel(rows, title="[bold green]Device Settings", style="green", width=80))
+
+            # List of commands
+            commands_strings = ["Generate new Device UUID", "Cancel"]
+            commands = [generate_uuid]
+
+            # Handle commands
+            ui_commands(commands_strings, commands)
+        #----------------------------------------------------------------------
+
+        # prompt_time_interval - Time Interval Prompt -------------------------
+        def prompt_time_interval():
+            nonlocal rows
+            console.clear()
+            ui_title("Settings")
+        
+            # Print device information
+            console.print(Panel(rows, title="[bold green]Device Settings", style="green", width=80))
+
+            # Handle input
+            time_interval = IntPrompt.ask("Enter new time interval (Enter 0 to Cancel)")
+
+            if time_interval <= 0:
+                return
+            else:
+                settings['time_interval'] = time_interval
+        #----------------------------------------------------------------------
+
+        console.clear()
+        ui_title("Settings")
+        
+        # Print device information
+        console.print(Panel(rows, title="[bold green]Device Settings", style="green", width=80))
+        
+        # List of commands
+        commands_strings = ["Generate new Device UUID", "Time Interval", "Back"]
+        commands = [prompt_uuid, prompt_time_interval, back]
+
+        # Handle commands
+        ui_commands(commands_strings, commands)
+
+#-----------------------------------------------------------------------------#
+# main_screen - Main screen                                                   #
+#-----------------------------------------------------------------------------#
+def main_screen():
+    global settings
+    login = True
+
+    if (settings['broadcasting'] == True):
+        broadcasting_screen()
+
+    # log_out - Logs out the user ---------------------------------------------
+    def log_out():
+        global settings, SETTINGS_PATH, validate_positive
+        nonlocal login
+        login = False
+        
+        # Remove User UID, ID Token and Refresh Token from the settings
+        del settings['user_uid']
+        del settings['refresh_token']
+        del settings['id_token']
+        del settings['token_expiration_time']
+
+        # Save settings to settings-file
+        try:
+            with open(SETTINGS_PATH, 'w') as f:
+                json.dump(settings, f, indent=4)
+        except IOError:
+            print(f"[bold red]{SETTINGS_PATH}: Could not write file. Please check if you have write permissions.")
+            exit(1)
+    #--------------------------------------------------------------------------
+
+    # Render loop...
+    while login:
+        console.clear()
+        user_uuid_column = Columns([Text("User UID:", style="bold blue"), Text(settings['user_uid'], style="white")])
+        device_uuid_column = Columns([Text("Device UUID:", style="bold blue"), Text(settings['device_uuid'], style="white")])
+
+        if (settings['time_interval'] == 1):
+            time_interval_column = Columns([Text("Time Interval:", style="bold blue"), Text("1 minute", style="white")] )
+        else:
+            time_interval_column = Columns([Text("Time Interval:", style="bold blue"), Text(str(settings['time_interval']) + " minutes", style="white")])
+
+        rows = Group(user_uuid_column, device_uuid_column, time_interval_column)
+
+        # Print title
+        ui_title("IsoLinna Control Panel v.1.1")
+
+        # Print device information
+        console.print(Panel(rows, title="[bold green]Device Information", style="green", width=80))
+        
+        # Print followed sensors
+        if len(settings['followed_sensors']) == 0:
+            console.print(Panel(Text("Automatic", style="bold white"), title="[bold green]Followed Sensors", style="green", width=80))
+        else:
+            followed_text = Text("\n".join(settings['followed_sensors']), style="bold white")
+            console.print(Panel(followed_text, title="[bold green]Followed Sensors", style="green", width=80))
+
+        # List of commands
+        commands_strings = ["Start broadcasting", "Sensors", "Settings", "Log out", "Quit"]
+        commands = [broadcasting_screen, sensors_screen, settings_screen, log_out, exit]
+
+        # Handle commands
+        ui_commands(commands_strings, commands)
+
+#-----------------------------------------------------------------------------#
+# login_screen - Login screen                                                 #
+#-----------------------------------------------------------------------------#
+def login_screen():
+    global settings
+
+    if 'user_uid' in settings and 'refresh_token' in settings:
         main_screen()
 
-    ui_clear()
-    ui_title("IsoLinna Control Panel v.1.0", 80)
-    ui_title("Login", 80)
-    print(ui_buffer)
+    console.clear()
+    ui_title("IsoLinna Control Panel v.1.1")
+    ui_title("Login")
+    console.print()
+    email = Prompt.ask("Enter your email-address")
+    password = Prompt.ask("Enter your password", password=True)
 
-    email = input("- Enter email: ")
-    password = getpass.getpass("- Enter password: ")
+    #email = "tomi.isojarvi@isolinna.com"
+    #password = "1234567890"
 
     try:
         user = auth.sign_in_with_email_and_password(email, password)
     except:
-        print("\033[1m\033[91mError: Invalid email or password\033[0m")
-        exit()
+        print("[bold red]Login Error: Invalid email or password")
+        exit(1)
 
-    user_uid = user['localId']
-    id_token = user['idToken']
-    refresh_token = user['refreshToken']
-    token_expiration_time = int(time.time()) + int(user['expiresIn'])
+    settings['user_uid'] = user['localId']
+    settings['id_token'] = user['idToken']
+    settings['refresh_token'] = user['refreshToken']
+    settings['token_expiration_time'] = int(time.time()) + int(user['expiresIn'])
 
-#------------------------------------------------------------------------------
-# main_screen - Main screen
-#------------------------------------------------------------------------------
-def main_screen():
-    global user_uid, device_uuid
-    login = True
-
-    if broadcasting == True:
-        broadcast_screen()
-
-    # log_out - Logs out the user ---------------------------------------------
-    def log_out():
-        nonlocal login
-        global stop_refresh
-        stop_refresh = True
-        login = False
-    #--------------------------------------------------------------------------
-
-    while login:
-        user_string = f"User UID:      {user_uid}"
-        uuid_string = f"Device UUID:   {device_uuid}"
-
-        if time_interval == 1:
-            time_string = "Time Interval: 1 minute"
-        else:
-            time_string = f"Time Interval: {time_interval} minutes"
-
-        ui_clear()
-        ui_title("IsoLinna Control Panel v.1.0", 80)
-        ui_table("Device Information", [user_string, uuid_string, time_string], 80)
-        ui_commands(["Start broadcasting", "Sensors", "Device UUID", "Time Interval", "Log out", "Quit"])
-        ui_enter_command("Enter command: ", [broadcast_screen, sensors_screen, uuid_screen, interval_screen, log_out, exit])
-
-#-----------------------------------------------------------------------------#
+    # Save settings to settings-file
+    try:
+        with open(SETTINGS_PATH, 'w') as f:
+            json.dump(settings, f, indent=4) 
+    except IOError:
+        print(f"{SETTINGS_PATH}: Could not write file. Please check if you have write permissions.")
+        exit(1)
 
 #-----------------------------------------------------------------------------#
 #                                    MAIN                                     #
 #-----------------------------------------------------------------------------#
 def main():
-    global device_uuid, firebaseConfig, firebase, auth, db, broadcasting
+    global SETTINGS_PATH, FIREBASE_CONF_PATH, settings, firebaseConfig, firebase, auth, db
 
-    uuid_path = './uuid.txt'
+    # Load settings...
 
-    # Does uuid.txt exists?
-    if (os.path.isfile(uuid_path)):
+    # Does settings-file exists?
+    if os.path.isfile(SETTINGS_PATH):
         # Yes...
-        # Read the Device UUID from uuid.txt
-        try:
-            with open(uuid_path, 'r') as f:
-                device_uuid = f.read()
-        except IOError:
-            print("uuid.txt: Could not read file")
-            exit()
+        # Is the file empty?
+        if os.path.getsize(SETTINGS_PATH) > 0:
+            # No ...    
+            # Read the settings from settings-file
+            try:
+                with open(SETTINGS_PATH, 'r') as f:
+                    settings = json.load(f)
+            except IOError:
+                print(f"[bold red]{SETTINGS_PATH}: Could not open file. Please check the file's permissions.")
+                exit(1)
+            except json.JSONDecodeError:
+                print(f"[bold red]{SETTINGS_PATH}: File contains invalid JSON.")
+                exit(1)
+        else:
+            # Yes...
+            print(f"[bold red]{SETTINGS_PATH}: File is empty.")
+            exit(1)
     else:
         # No...
-        # Generate a new unique Device UUID
-        device_uuid = uuid.uuid1()
-        # ...and write it to uuid.txt
+        # Create default settings
+        settings['time_interval'] = 1
+        settings['device_uuid'] = str(uuid.uuid1())  # Generate UUID and convert it to string
+        settings["broadcasting"] = False
+        settings['followed_sensors'] = []
+
+        # Save settings to settings-file
         try:
-            with open(uuid_path, 'w') as f:
-                f.write(str(device_uuid))
-                print("uuid.txt: File created successfully.")
+            with open(SETTINGS_PATH, 'w') as f:
+                json.dump(settings, f, indent=4) 
         except IOError:
-            print("uuid.txt: Could not create file")
-            exit()
+            print(f"[bold red]{SETTINGS_PATH}: Could not write file. Please check if you have write permissions.")
+            exit(1)
 
-    # Load Firebase configuration from isolinna.json
+    # Load Firebase configuration...
+
+    # Does configuration-file exists?
+    if os.path.isfile(FIREBASE_CONF_PATH):
+        # Yes...
+        # Is the file empty?
+        if os.path.getsize(FIREBASE_CONF_PATH) > 0:
+            # No ...    
+            # Read the configuration from configuration-file
+            try:
+                with open(FIREBASE_CONF_PATH, 'r') as f:
+                    firebaseConfig = json.load(f)
+            except IOError:
+                print(f"[bold red]{FIREBASE_CONF_PATH}: Could not open file. Please check the file's permissions.")
+                exit(1)
+            except json.JSONDecodeError:
+                print(f"[bold red]{FIREBASE_CONF_PATH}: File contains invalid JSON.")
+                exit(1)
+        else:
+            # Yes...
+            print(f"[bold red]{FIREBASE_CONF_PATH}: File is empty.")
+            exit(1)
+    else:
+        # No...
+        print(f"[bold red]{FIREBASE_CONF_PATH}: File does not exist.")
+        exit(1)
+
+    # Setup Firebase...
+
     try:
-        with open("isolinna.json", 'r') as file:
-            firebaseConfig = json.load(file)
-    except IOError:
-        print("isolinna.json: Could not read file")
-        exit()
-    
-    # Setup Firebase
-    firebase = pyrebase.initialize_app(firebaseConfig)
-    auth = firebase.auth()
-    db = firebase.database()
+        firebase = pyrebase.initialize_app(firebaseConfig)
+        auth = firebase.auth()
+        db = firebase.database()
+    except KeyError as e:
+        print(f"[bold red]Firebase configuration is missing a required key: {e}")
+        exit(1) 
+    except ValueError as e:
+        print(f"[bold red]Invalid value in Firebase configuration: {e}")
+        exit(1)
+    except TypeError as e:
+        print(f"[bold red]Incorrect Firebase configuration format: {e}")
+        exit(1)
+    except AttributeError as e:
+        print(f"[bold red]Error initializing Firebase services: {e}")
+        exit(1)
+    except Exception as e:  # Catch-all for unexpected errors
+        print(f"[bold red]An unexpected error occurred: {e}")
+        exit(1)
 
+    
     # Main loop...
     while True:
         login_screen()
