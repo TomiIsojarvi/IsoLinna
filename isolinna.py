@@ -4,7 +4,6 @@ import uuid
 import pyrebase
 import time
 import threading
-from ruuvitag_sensor.ruuvi import RuuviTagSensor, RunFlag
 from datetime import datetime, timezone
 from rich.console import Console
 from rich.prompt import Prompt, IntPrompt
@@ -17,6 +16,11 @@ from rich.console import Group
 from rich import print
 from rich.markup import escape
 import logging
+
+# NOTE: This must be set before importing ruuvitag_sensor.
+os.environ["RUUVI_BLE_ADAPTER"] = "bluez"
+
+from ruuvitag_sensor.ruuvi import RuuviTagSensor, RunFlag
 
 # Turn off the warnings because of ruuvitag_sensor
 logging.basicConfig(level=logging.ERROR)
