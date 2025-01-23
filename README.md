@@ -1,6 +1,10 @@
 # IsoLinna
 ## Installation
 ### Raspberry Pi & Raspberry Pi OS
+#### Update the System
+```sh
+sudo apt-get update &&  sudo apt-get dist-upgrade && echo +++ upgrade successful +++
+```
 NOTE: You must install Pyrebase 4 which is a forked version of Pyrebase. IsoLinna will not work with the original Pyrebase.
 ```sh
 pip install ruuvitag-sensor
