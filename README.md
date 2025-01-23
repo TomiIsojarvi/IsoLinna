@@ -24,9 +24,8 @@ python -m pip install --upgrade setuptools
 python -m pip install pyrebase4
 python -m pip install ruuvitag-sensor
 python -m pip install rich
-```s
+```
 Please note that you have to install pyrebase4 which is a forked version of Pyrebase. Application won't work on regular Pyrebase.
-
 #### Create isolinna.json
 Create a isolinna.json-file with following information:
 ```sh
