@@ -4,6 +4,7 @@ import uuid
 import pyrebase
 import time
 import threading
+import subprocess
 from datetime import datetime, timezone
 from rich.console import Console
 from rich.prompt import Prompt, IntPrompt
@@ -161,16 +162,17 @@ def broadcasting_screen():
                 }, 
                 settings['id_token']
             )
-
-            console.clear()
+            
+            subprocess.call(['tput', 'reset'])
+            # console.clear()
             ui_title("Broadcasting...")
             console.print()
 
             # Print table
             table = Table(title="Recent Events", width=80, box=box.ROUNDED, style="green", title_style="bold green")
 
-            table.add_column("Time", justify="center", style="cyan", header_style="bold cyan")
-            table.add_column("Sensor", justify="center", style="blue", header_style="bold blue")
+            table.add_column("Time", justify="center", style="yellow", header_style="bold yellow")
+            table.add_column("Sensor", justify="center", style="cyan", header_style="bold cyan")
             table.add_column("Data", justify="center", style="white", header_style="bold white")
 
             for data in data_history:
@@ -222,14 +224,15 @@ def broadcasting_screen():
 
     # Render loop...
     while not finished:
-        console.clear()
+        subprocess.call(['tput', 'reset'])
+        # console.clear()
         ui_title("Broadcasting...")
 
         # Print table
         table = Table(title="Recent Events", width=80, box=box.ROUNDED, style="green", title_style="bold green")
 
-        table.add_column("Time", justify="center", style="cyan", header_style="bold cyan")
-        table.add_column("Sensor", justify="center", style="blue", header_style="bold blue")
+        table.add_column("Time", justify="center", style="yellow", header_style="bold yellow")
+        table.add_column("Sensor", justify="center", style="cyan", header_style="bold cyan")
         table.add_column("Data", justify="center", style="white", header_style="bold white")
 
         for data in data_history:
@@ -279,7 +282,8 @@ def scanning_screen():
             ui_update = True
 
         if ui_update == True:
-            console.clear()
+            subprocess.call(['tput', 'reset'])
+            # console.clear()
             ui_title("Scanning sensors...")
             # Print newly discovered sensors...
             if len(new_discoveries) == 0:
@@ -314,9 +318,10 @@ def scanning_screen():
 
     # Render loop...
     while not finished:
-        console.clear()
+        subprocess.call(['tput', 'reset'])
+        # console.clear()
         ui_title("Scanning sensors...")
-        
+
         # Print newly discovered sensors...
         if len(new_discoveries) == 0:
             console.print(Panel(Text(""), title="[bold green]New Discovered Sensors", style="green", width=80))
@@ -382,8 +387,8 @@ def follow_unfollow_sensors_screen():
             f"{discovered_sensors.index(sensor) + 1}: {sensor}" for sensor in followed_sensors_sorted
         ]
 
-
-        console.clear()
+        subprocess.call(['tput', 'reset'])
+        # console.clear()
         ui_title("Follow / Unfollow Sensors")
 
         # Print discovered sensors...
@@ -439,7 +444,8 @@ def sensors_screen():
 
     # Render loop...
     while not finished:
-        console.clear()
+        subprocess.call(['tput', 'reset'])
+        # console.clear()
         ui_title("Sensors")
 
         # Print discovered sensors...
@@ -509,7 +515,8 @@ def settings_screen():
         def prompt_uuid():
             nonlocal rows
             
-            console.clear()
+            subprocess.call(['tput', 'reset'])
+            # console.clear()
             console.print(Panel(Text("Settings", justify="center"), style="bold green", width=80))
         
             # Print device information
@@ -526,7 +533,8 @@ def settings_screen():
         # prompt_time_interval - Time Interval Prompt -------------------------
         def prompt_time_interval():
             nonlocal rows
-            console.clear()
+            subprocess.call(['tput', 'reset'])
+            # console.clear()
             ui_title("Settings")
         
             # Print device information
@@ -541,7 +549,8 @@ def settings_screen():
                 settings['time_interval'] = time_interval
         #----------------------------------------------------------------------
 
-        console.clear()
+        subprocess.call(['tput', 'reset'])
+        # console.clear()
         ui_title("Settings")
         
         # Print device information
@@ -587,7 +596,8 @@ def main_screen():
 
     # Render loop...
     while login:
-        console.clear()
+        subprocess.call(['tput', 'reset'])
+        # console.clear()
         user_uuid_column = Columns([Text("User UID:", style="bold blue"), Text(settings['user_uid'], style="white")])
         device_uuid_column = Columns([Text("Device UUID:", style="bold blue"), Text(settings['device_uuid'], style="white")])
 
@@ -627,7 +637,8 @@ def login_screen():
     if 'user_uid' in settings and 'refresh_token' in settings:
         main_screen()
 
-    console.clear()
+    subprocess.call(['tput', 'reset'])
+    # console.clear()
     ui_title("IsoLinna Control Panel v.1.1")
     ui_title("Login")
     console.print()
