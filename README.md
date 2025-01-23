@@ -36,3 +36,7 @@ Create a isolinna.json-file with following information:
   "storageBucket": "URL of your Firebase Storage bucket",
 }
 ```
+#### Run the application
+```sh
+python isolinna.py
+```
